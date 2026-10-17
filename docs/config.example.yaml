@@ -358,15 +358,11 @@ models:
       --ctx-size ${default_ctx}
       --temperature ${temp}
 
-    # capacity: declared usage and eviction cost for use: capacity
-    # - absent/null/empty usage declaration makes the model exclusive
-    # - usage: positive integer, in the same unit as the router's total
+    # capacity: declared pool usage and model-level eviction cost for use: capacity
+    # - absent/null/empty pool declarations make the model exclusive
+    # - usage: positive integer, in the same unit as that pool's total
     # - evict_cost: positive integer, default 1; higher favors keeping resident
     # - bounded search favors lowest summed eviction cost, then count and IDs
-    # capacity:
-    #   usage: 18000
-    #   evict_cost: 10
-    # With named router pools, use a list instead of scalar usage:
     # capacity:
     #   evict_cost: 10
     #   pools:
@@ -688,19 +684,17 @@ routing:
 
     # settings: a dictionary of settings for the specific engines
     settings:
-      # capacity: a single budget or named pools (no automatic measurement)
+      # capacity: one or more named pools (no automatic measurement)
       # - requires use: capacity; remove groups and matrix settings when enabling
       # - cannot combine with legacy top-level groups/matrix either
-      # - total: positive integer in the same unit as models.*.capacity.usage
-      #   (for example MiB of RAM); omitted model usage means exclusive operation
+      # - pools: required nonempty list; each name is unique
+      # - each total is a positive integer, in the unit of that pool's usage
+      # - omitted model pools mean exclusive operation
       # - oversized models, unknown/duplicate pools, and invalid values are errors
       # - bounded search favors summed evict_cost, then count, then sorted IDs
       # - if its search budget is exhausted, the best feasible plan is used
       # - only resident models are searched; only the requested model is started
-      # Single-budget shorthand (existing syntax remains supported):
-      # capacity:
-      #   total: 24000
-      # Or named pools (cannot combine total and pools):
+      # Example (one pool is sufficient for a single budget):
       # capacity:
       #   pools:
       #     - name: ram
@@ -709,7 +703,7 @@ routing:
       #       total: 24000
       # Each model lists its pool usage; unlisted pools consume zero.
       # Evicting a model releases all its pools and counts evict_cost once.
-      # Missing usage is exclusive in both directions across all local models.
+      # Omitted model pool declarations are exclusive across all local models.
       # Pool names only track budgets; select devices in the model command.
 
       # groups: a dictionary of named groups

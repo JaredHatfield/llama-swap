@@ -207,6 +207,6 @@ func (s *capacitySwapper) evictionFor(target string, running []string) []string 
 func (s *capacitySwapper) OnSwapStart(target string, running []string) {
 	evict := s.EvictionFor(target, running)
 	if len(evict) > 0 {
-		s.logger.Infof("capacity: model=%s evict=%v total=%d pool_totals=%v search_nodes=%d search_limited=%t", target, evict, s.capacity.Total, s.capacity.Totals(), s.searchNodes, s.searchLimited)
+		s.logger.Infof("capacity: model=%s evict=%v pool_totals=%v search_nodes=%d search_limited=%t", target, evict, s.capacity.Totals(), s.searchNodes, s.searchLimited)
 	}
 }

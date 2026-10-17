@@ -243,10 +243,9 @@ budget runs out, the result still fits every pool but may not be globally
 cheapest. Swap logs report `search_limited=true` when this happens. Victims finish
 active requests before unloading; only the requested model starts.
 
-### Single-budget compatibility
+### One pool
 
-Existing scalar configs remain supported. Use `total` instead of router `pools`,
-and `usage` instead of model `pools`:
+For a single budget, declare one pool and reference it on each model:
 
 ```yaml
 routing:
@@ -254,16 +253,21 @@ routing:
     use: capacity
     settings:
       capacity:
-        total: 100
+        pools:
+          - name: memory
+            total: 100
 models:
   chat:
     cmd: llama-server -m /models/chat.gguf --port ${PORT}
     capacity:
-      usage: 60
       evict_cost: 50
+      pools:
+        - pool: memory
+          usage: 60
 ```
 
-Choose one form for the configuration; do not mix scalar usage with named pools.
+Capacity routing always requires at least one named pool. Existing group and
+matrix configurations keep their behavior.
 
 ### Defaults and validation
 

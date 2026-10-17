@@ -8,12 +8,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// CapacityConfig declares either one abstract budget or independent named pools.
+// CapacityConfig declares independent named resource pools.
 // Units are operator-chosen and may differ between pools.
 type CapacityConfig struct {
-	Total    int64                `yaml:"total,omitempty"`
-	Pools    []CapacityPoolConfig `yaml:"pools,omitempty"`
-	totalSet bool
+	Pools []CapacityPoolConfig `yaml:"pools"`
 }
 
 type CapacityPoolConfig struct {
@@ -27,31 +25,27 @@ type ModelCapacityPoolConfig struct {
 }
 
 type ModelCapacityConfig struct {
-	Usage     int64                     `yaml:"usage,omitempty"`
 	EvictCost int64                     `yaml:"evict_cost"`
 	Pools     []ModelCapacityPoolConfig `yaml:"pools,omitempty"`
-	usageSet  bool
 }
 
 func (c *CapacityConfig) UnmarshalYAML(node *yaml.Node) error {
 	type rawCapacity CapacityConfig
 	var raw rawCapacity
-	if err := decodeCapacity(node, &raw, "total", "pools"); err != nil {
+	if err := decodeCapacity(node, &raw, "pools"); err != nil {
 		return err
 	}
 	*c = CapacityConfig(raw)
-	c.totalSet = capacityHasKey(node, "total")
 	return nil
 }
 
 func (c *ModelCapacityConfig) UnmarshalYAML(node *yaml.Node) error {
 	type rawCapacity ModelCapacityConfig
 	raw := rawCapacity{EvictCost: 1}
-	if err := decodeCapacity(node, &raw, "usage", "evict_cost", "pools"); err != nil {
+	if err := decodeCapacity(node, &raw, "evict_cost", "pools"); err != nil {
 		return err
 	}
 	*c = ModelCapacityConfig(raw)
-	c.usageSet = capacityHasKey(node, "usage")
 	return nil
 }
 
@@ -63,15 +57,6 @@ func (c *CapacityPoolConfig) UnmarshalYAML(node *yaml.Node) error {
 func (c *ModelCapacityPoolConfig) UnmarshalYAML(node *yaml.Node) error {
 	type raw ModelCapacityPoolConfig
 	return decodeCapacity(node, (*raw)(c), "pool", "usage")
-}
-
-func capacityHasKey(node *yaml.Node, key string) bool {
-	for i := 0; i < len(node.Content); i += 2 {
-		if node.Content[i].Value == key {
-			return true
-		}
-	}
-	return false
 }
 
 // Reject numeric truncation, unknown fields, null values and malformed lists.
@@ -111,7 +96,7 @@ func decodeCapacity(node *yaml.Node, dst any, fields ...string) error {
 
 // Exclusive models have no usage declaration and cannot coexist with any model.
 func (c *ModelCapacityConfig) Exclusive() bool {
-	return c == nil || (!c.usageSet && c.Usage == 0 && c.Pools == nil)
+	return c == nil || c.Pools == nil
 }
 
 func (c *ModelCapacityConfig) EvictionCost() int64 {
@@ -121,11 +106,8 @@ func (c *ModelCapacityConfig) EvictionCost() int64 {
 	return c.EvictCost
 }
 
-// Totals and UsageVector normalize both config forms into the same pool order.
+// Totals and UsageVector use the declared pool order.
 func (c *CapacityConfig) Totals() []int64 {
-	if c.Pools == nil {
-		return []int64{c.Total}
-	}
 	totals := make([]int64, len(c.Pools))
 	for i, pool := range c.Pools {
 		totals[i] = pool.Total
@@ -134,12 +116,8 @@ func (c *CapacityConfig) Totals() []int64 {
 }
 
 func (c *CapacityConfig) UsageVector(model *ModelCapacityConfig) []int64 {
-	usage := make([]int64, len(c.Totals()))
+	usage := make([]int64, len(c.Pools))
 	if model.Exclusive() {
-		return usage
-	}
-	if c.Pools == nil {
-		usage[0] = model.Usage
 		return usage
 	}
 	for _, requirement := range model.Pools {
@@ -154,9 +132,6 @@ func (c *CapacityConfig) UsageVector(model *ModelCapacityConfig) []int64 {
 }
 
 func (c ModelCapacityConfig) Validate() error {
-	if (c.usageSet || c.Usage != 0) && c.Usage <= 0 {
-		return fmt.Errorf("capacity.usage must be a positive integer")
-	}
 	if c.EvictCost <= 0 {
 		return fmt.Errorf("capacity.evict_cost must be a positive integer")
 	}
@@ -168,27 +143,21 @@ func ValidateCapacity(c *CapacityConfig, models map[string]ModelConfig) error {
 	if c == nil {
 		return fmt.Errorf("capacity configuration is required")
 	}
-	if c.Pools != nil && (c.totalSet || c.Total != 0) {
-		return fmt.Errorf("total and pools cannot be combined")
+	if len(c.Pools) == 0 {
+		return fmt.Errorf("pools must contain at least one named pool")
 	}
-	if c.Pools == nil && c.Total <= 0 {
-		return fmt.Errorf("total must be a positive integer")
-	}
-	if c.Pools != nil && len(c.Pools) == 0 {
-		return fmt.Errorf("pools must be a nonempty list")
-	}
-	names := make(map[string]int)
-	for i, pool := range c.Pools {
+	names := make(map[string]struct{}, len(c.Pools))
+	for _, pool := range c.Pools {
 		if strings.TrimSpace(pool.Name) == "" {
 			return fmt.Errorf("pool name must be a nonempty string")
 		}
 		if _, ok := names[pool.Name]; ok {
-			return fmt.Errorf("duplicate pool %q", pool.Name)
+			return fmt.Errorf("pools contains duplicate pool name %q", pool.Name)
 		}
 		if pool.Total <= 0 {
 			return fmt.Errorf("pool %q total must be a positive integer", pool.Name)
 		}
-		names[pool.Name] = i
+		names[pool.Name] = struct{}{}
 	}
 	totals := c.Totals()
 	sums := make([]int64, len(totals))
@@ -199,28 +168,18 @@ func ValidateCapacity(c *CapacityConfig, models map[string]ModelConfig) error {
 			if err := mc.Validate(); err != nil {
 				return fmt.Errorf("model %q: %w", id, err)
 			}
-			scalar := mc.usageSet || mc.Usage != 0
-			if scalar && mc.Pools != nil {
-				return fmt.Errorf("model %q: usage and pools cannot be combined", id)
-			}
-			if c.Pools != nil && scalar {
-				return fmt.Errorf("model %q: named pools require capacity.pools", id)
-			}
-			if c.Pools == nil && mc.Pools != nil {
-				return fmt.Errorf("model %q: capacity.pools requires named router pools", id)
-			}
 			if mc.Pools != nil && len(mc.Pools) == 0 {
 				return fmt.Errorf("model %q: pools must be a nonempty list", id)
 			}
-			seen := make(map[string]bool)
+			seen := make(map[string]struct{}, len(mc.Pools))
 			for _, pool := range mc.Pools {
 				if _, ok := names[pool.Pool]; !ok {
 					return fmt.Errorf("model %q: unknown pool %q", id, pool.Pool)
 				}
-				if seen[pool.Pool] {
-					return fmt.Errorf("model %q: duplicate pool %q", id, pool.Pool)
+				if _, duplicate := seen[pool.Pool]; duplicate {
+					return fmt.Errorf("model %q: capacity.pools contains duplicate pool %q", id, pool.Pool)
 				}
-				seen[pool.Pool] = true
+				seen[pool.Pool] = struct{}{}
 				if pool.Usage <= 0 {
 					return fmt.Errorf("model %q: pool %q usage must be a positive integer", id, pool.Pool)
 				}
@@ -228,10 +187,10 @@ func ValidateCapacity(c *CapacityConfig, models map[string]ModelConfig) error {
 		}
 		for i, amount := range c.UsageVector(mc) {
 			if amount > totals[i] {
-				return fmt.Errorf("model %q: capacity.usage (%d) exceeds total (%d) in pool %d", id, amount, totals[i], i)
+				return fmt.Errorf("model %q: usage (%d) exceeds total (%d) for pool %q", id, amount, totals[i], c.Pools[i].Name)
 			}
 			if amount > math.MaxInt64-sums[i] {
-				return fmt.Errorf("sum of capacity.usage exceeds int64 range in pool %d", i)
+				return fmt.Errorf("sum of capacity pool usage exceeds int64 range for pool %q", c.Pools[i].Name)
 			}
 			sums[i] += amount
 		}

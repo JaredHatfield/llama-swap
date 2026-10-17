@@ -55,8 +55,8 @@ func TestConfig_CapacityPools(t *testing.T) {
 
 func TestConfig_CapacityPoolsValidation(t *testing.T) {
 	for _, tc := range []struct{ name, from, to, want string }{
-		{"mixed router", "        pools:", "        total: 100\n        pools:", "cannot be combined"},
-		{"mixed zero router", "        pools:", "        total: 0\n        pools:", "cannot be combined"},
+		{"removed router total", "        pools:", "        total: 100\n        pools:", "unknown capacity setting"},
+		{"removed zero router total", "        pools:", "        total: 0\n        pools:", "unknown capacity setting"},
 		{"duplicate declaration", "name: gpu", "name: ram", "duplicate pool"},
 		{"unknown reference", "pool: gpu", "pool: typo", "unknown pool"},
 		{"duplicate reference", "pool: gpu", "pool: ram", "duplicate pool"},
@@ -68,14 +68,14 @@ func TestConfig_CapacityPoolsValidation(t *testing.T) {
 		{"fraction usage", "usage: 6", "usage: 6.5", "must be an integer"},
 		{"oversized", "usage: 6", "usage: 11", "exceeds total"},
 		{"unknown field", "usage: 6", "usage: 6\n          typo: 1", "unknown capacity setting"},
-		{"mixed model", "      evict_cost: 10", "      usage: 1\n      evict_cost: 10", "cannot be combined"},
+		{"mixed model", "      evict_cost: 10", "      usage: 1\n      evict_cost: 10", "unknown capacity setting"},
 		{"empty router pools", "        pools:\n          - name: ram\n            total: 100\n          - name: gpu\n            total: 10", "        pools: []", "nonempty list"},
 		{"empty model pools", "      pools:\n        - pool: ram\n          usage: 30", "      pools: []", "nonempty list"},
 		{"null model pools", "      pools:\n        - pool: ram\n          usage: 30", "      pools: null", "nonempty list"},
 		{"scalar pool entry", "        - pool: ram\n          usage: 30", "        - 42", "mapping"},
 		{"null usage", "usage: 6", "usage: null", "must be an integer"},
 		{"overflow usage", "usage: 6", "usage: 9223372036854775808", "cannot unmarshal"},
-		{"scalar in named mode", "      pools:\n        - pool: ram\n          usage: 30", "      usage: 30", "named pools require"},
+		{"scalar in named mode", "      pools:\n        - pool: ram\n          usage: 30", "      usage: 30", "unknown capacity setting"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := LoadConfigFromReader(strings.NewReader(strings.Replace(poolsConfig, tc.from, tc.to, 1)))
@@ -83,7 +83,7 @@ func TestConfig_CapacityPoolsValidation(t *testing.T) {
 		})
 	}
 	_, err := LoadConfigFromReader(strings.NewReader(strings.Replace(poolsConfig, "        pools:\n          - name: ram\n            total: 100\n          - name: gpu\n            total: 10", "        total: 100", 1)))
-	require.ErrorContains(t, err, "requires named router pools")
+	require.ErrorContains(t, err, `unknown capacity setting "total"`)
 }
 
 func TestConfig_CapacityExclusiveDefaults(t *testing.T) {
@@ -117,7 +117,7 @@ func TestConfig_CapacityGuideExamples(t *testing.T) {
 	require.True(t, found, "capacity section must exist")
 	section = strings.SplitN(section, "## Which one?", 2)[0]
 	examples := strings.Split(section, "```yaml\n")[1:]
-	require.Len(t, examples, 2, "keep named pools and single-budget compatibility examples")
+	require.Len(t, examples, 2, "keep multiple-pool and single-pool examples")
 	for i, example := range examples {
 		input := strings.SplitN(example, "```", 2)[0]
 		cfg, err := LoadConfigFromReader(strings.NewReader(input))
@@ -136,5 +136,42 @@ func TestConfig_CapacityGuideExamples(t *testing.T) {
 		for p, total := range totals {
 			require.LessOrEqual(t, used[p], total)
 		}
+	}
+}
+
+func TestConfig_CapacityDuplicatePoolNames(t *testing.T) {
+	for _, tc := range []struct{ name, input, want string }{
+		{"same name and total", strings.Replace(poolsConfig, "name: gpu\n            total: 10", "name: ram\n            total: 100", 1), `routing.router.settings.capacity: pools contains duplicate pool name "ram"`},
+		{"same name different total", strings.Replace(poolsConfig, "name: gpu", "name: ram", 1), `routing.router.settings.capacity: pools contains duplicate pool name "ram"`},
+		{"nonadjacent duplicate", strings.Replace(poolsConfig, "            total: 10\n", "            total: 10\n          - name: ram\n            total: 200\n", 1), `routing.router.settings.capacity: pools contains duplicate pool name "ram"`},
+		{"repeated model reference", strings.Replace(poolsConfig, "pool: gpu", "pool: ram", 1), `routing.router.settings.capacity: model "a": capacity.pools contains duplicate pool "ram"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadConfigFromReader(strings.NewReader(tc.input))
+			require.EqualError(t, err, tc.want)
+			// Merged sources must take the same validation path as a single config.
+			dir := t.TempDir()
+			parts := strings.SplitN(tc.input, "models:\n", 2)
+			require.Len(t, parts, 2)
+			writeYAML(t, dir, "routing.yaml", parts[0])
+			writeYAML(t, dir, "models.yaml", "models:\n"+parts[1])
+			_, err = LoadConfigSources("", dir)
+			require.EqualError(t, err, tc.want)
+		})
+	}
+}
+
+func TestConfig_CapacityRequiresNamedPools(t *testing.T) {
+	for _, tc := range []struct{ name, block, want string }{
+		{"missing pools", "{}", "at least one named pool"},
+		{"empty pools", "{pools: []}", "nonempty list"},
+		{"null pools", "{pools: null}", "nonempty list"},
+		{"scalar total", "{total: 10}", `unknown capacity setting "total"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := capacityModels + "routing:\n  router:\n    use: capacity\n    settings:\n      capacity: " + tc.block + "\n"
+			_, err := LoadConfigFromReader(strings.NewReader(input))
+			require.ErrorContains(t, err, tc.want)
+		})
 	}
 }

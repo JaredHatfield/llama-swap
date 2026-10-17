@@ -41,7 +41,7 @@ func TestServer_CapacityProcessLifecycle(t *testing.T) {
     use: capacity
     settings:
       capacity:
-        total: 20
+        pools: [{name: main, total: 20}]
 hooks:
   on_startup:
     preload: [a]
@@ -52,15 +52,15 @@ models:
   a:
     cmd: '"%s" -port ${PORT} -silent'
     aliases: [alias-a]
-    capacity: {usage: 10, evict_cost: 100}
+    capacity: {pools: [{pool: main, usage: 10}], evict_cost: 100}
   b:
-    capacity: {usage: 5, evict_cost: 1}
+    capacity: {pools: [{pool: main, usage: 5}], evict_cost: 1}
     cmd: '"%s" -port ${PORT} -silent'
   c:
-    capacity: {usage: 5, evict_cost: 1}
+    capacity: {pools: [{pool: main, usage: 5}], evict_cost: 1}
     cmd: '"%s" -port ${PORT} -silent'
   d:
-    capacity: {usage: 10, evict_cost: 1}
+    capacity: {pools: [{pool: main, usage: 10}], evict_cost: 1}
     cmd: '"%s" -port ${PORT} -silent'
     ttl: 1
 `, filepath.ToSlash(binary), filepath.ToSlash(binary), filepath.ToSlash(binary), filepath.ToSlash(binary))
@@ -97,9 +97,9 @@ models:
 		var total int64
 		for _, id := range ids {
 			require.Equal(t, process.StateReady, running[id])
-			total += cfg.Models[id].Capacity.Usage
+			total += cfg.Models[id].Capacity.Pools[0].Usage
 		}
-		require.LessOrEqual(t, total, cfg.Routing.Router.Settings.Capacity.Total)
+		require.LessOrEqual(t, total, cfg.Routing.Router.Settings.Capacity.Pools[0].Total)
 	}
 	request("b")
 	resident("a", "b")
@@ -121,7 +121,7 @@ models:
 	require.NoError(t, s.Shutdown(3*time.Second))
 	require.Empty(t, s.local.RunningModels())
 	// Reload uses a fresh server; no stale capacity or resident accounting.
-	cfg.Routing.Router.Settings.Capacity.Total = 10
+	cfg.Routing.Router.Settings.Capacity.Pools[0].Total = 10
 	cfg.Hooks.OnStartup.Preload = nil
 	s, err = New(cfg, logmon.NewGroup(io.Discard, true, true, true), nil, st, BuildInfo{}, nil, nil)
 	require.NoError(t, err)

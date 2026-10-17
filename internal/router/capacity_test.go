@@ -23,9 +23,9 @@ func newCapacityPlanner(total int64, usage map[string]int64, costs map[string]in
 		if value, ok := costs[id]; ok {
 			cost = value
 		}
-		models[id] = config.ModelConfig{Capacity: &config.ModelCapacityConfig{Usage: amount, EvictCost: cost}}
+		models[id] = config.ModelConfig{Capacity: &config.ModelCapacityConfig{Pools: []config.ModelCapacityPoolConfig{{Pool: "main", Usage: amount}}, EvictCost: cost}}
 	}
-	return &capacitySwapper{capacity: &config.CapacityConfig{Total: total}, models: models, logger: logmon.NewWriter(io.Discard)}
+	return &capacitySwapper{capacity: &config.CapacityConfig{Pools: []config.CapacityPoolConfig{{Name: "main", Total: total}}}, models: models, logger: logmon.NewWriter(io.Discard)}
 }
 
 func TestCapacity_EvictionFor(t *testing.T) {
@@ -75,7 +75,7 @@ func TestCapacity_DecisionCache(t *testing.T) {
 		s.EvictionFor("x", snapshot)
 	}))
 	s.OnSwapStart("x", snapshot)
-	require.Contains(t, logs.String(), "capacity: model=x evict=[a] total=10")
+	require.Contains(t, logs.String(), "capacity: model=x evict=[a] pool_totals=[10]")
 	require.Same(t, &evict[0], &s.lastEvict[0])
 
 	// A different target needs a new decision even with the same residents.
@@ -186,10 +186,10 @@ func BenchmarkCapacity_EvictionFor(b *testing.B) {
 // Three requests arrive while the first two starts are pending. The third
 // cannot consume unreserved capacity, or stop a chosen victim mid-request.
 func TestCapacity_PendingStartsAndBusyEviction(t *testing.T) {
-	for _, named := range []bool{false, true} {
-		t.Run(fmt.Sprintf("pools=%t", named), func(t *testing.T) {
+	for _, multiple := range []bool{false, true} {
+		t.Run(fmt.Sprintf("multiple=%t", multiple), func(t *testing.T) {
 			planner := newCapacityPlanner(10, map[string]int64{"a": 4, "b": 4, "c": 4}, nil)
-			if named {
+			if multiple {
 				planner = poolPlanner(map[string]config.ModelConfig{"a": poolModel(1, 4, 4), "b": poolModel(1, 4, 4), "c": poolModel(1, 4, 4)})
 			}
 			a, b, c := newFakeProcess("a"), newFakeProcess("b"), newFakeProcess("c")
