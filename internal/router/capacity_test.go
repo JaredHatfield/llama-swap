@@ -25,7 +25,7 @@ func newCapacityPlanner(total int64, usage map[string]int64, costs map[string]in
 		}
 		models[id] = config.ModelConfig{Capacity: &config.ModelCapacityConfig{Usage: amount, EvictCost: cost}}
 	}
-	return &capacitySwapper{total: total, models: models, logger: logmon.NewWriter(io.Discard)}
+	return &capacitySwapper{capacity: &config.CapacityConfig{Total: total}, models: models, logger: logmon.NewWriter(io.Discard)}
 }
 
 func TestCapacity_EvictionFor(t *testing.T) {
@@ -186,46 +186,54 @@ func BenchmarkCapacity_EvictionFor(b *testing.B) {
 // Three requests arrive while the first two starts are pending. The third
 // cannot consume unreserved capacity, or stop a chosen victim mid-request.
 func TestCapacity_PendingStartsAndBusyEviction(t *testing.T) {
-	a, b, c := newFakeProcess("a"), newFakeProcess("b"), newFakeProcess("c")
-	a.serveBlock = make(chan struct{})
-	c.autoReady = true
-	r := newTestBase(t, map[string]process.Process{"a": a, "b": b, "c": c}, newCapacityPlanner(10, map[string]int64{"a": 4, "b": 4, "c": 4}, nil))
-	var release sync.Once
-	t.Cleanup(func() { release.Do(func() { close(a.serveBlock) }) })
-	request := func(id string) <-chan int {
-		done := make(chan int, 1)
-		go func() { w := httptest.NewRecorder(); r.ServeHTTP(w, newRequest(id)); done <- w.Code }()
-		return done
+	for _, named := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pools=%t", named), func(t *testing.T) {
+			planner := newCapacityPlanner(10, map[string]int64{"a": 4, "b": 4, "c": 4}, nil)
+			if named {
+				planner = poolPlanner(map[string]config.ModelConfig{"a": poolModel(1, 4, 4), "b": poolModel(1, 4, 4), "c": poolModel(1, 4, 4)})
+			}
+			a, b, c := newFakeProcess("a"), newFakeProcess("b"), newFakeProcess("c")
+			a.serveBlock = make(chan struct{})
+			c.autoReady = true
+			r := newTestBase(t, map[string]process.Process{"a": a, "b": b, "c": c}, planner)
+			var release sync.Once
+			t.Cleanup(func() { release.Do(func() { close(a.serveBlock) }) })
+			request := func(id string) <-chan int {
+				done := make(chan int, 1)
+				go func() { w := httptest.NewRecorder(); r.ServeHTTP(w, newRequest(id)); done <- w.Code }()
+				return done
+			}
+			adone := request("a")
+			waitProcessed(t, r.testProcessed, 1)
+			waitSignal(t, a.runStarted, "a start")
+			bdone := request("b")
+			waitProcessed(t, r.testProcessed, 1)
+			waitSignal(t, b.runStarted, "b start")
+			cdone := request("c")
+			waitProcessed(t, r.testProcessed, 1)
+			require.Zero(t, c.runCalls.Load(), "pending starts consume capacity")
+			a.markReady()
+			waitProcessed(t, r.testProcessed, 1)
+			waitSignal(t, a.serveStarted, "a serving")
+			b.markReady()
+			waitProcessed(t, r.testProcessed, 1)
+			require.Zero(t, a.stopCalls.Load(), "busy victim must finish before eviction")
+			require.Zero(t, c.runCalls.Load())
+			release.Do(func() { close(a.serveBlock) })
+			for _, done := range []<-chan int{adone, bdone, cdone} {
+				select {
+				case code := <-done:
+					require.Equal(t, 200, code)
+				case <-t.Context().Done():
+					t.Fatal("request did not complete")
+				}
+			}
+			require.Equal(t, process.StateStopped, a.State())
+			require.Equal(t, process.StateReady, b.State())
+			require.Equal(t, process.StateReady, c.State())
+			require.False(t, a.stoppedWhileServing.Load())
+		})
 	}
-	adone := request("a")
-	waitProcessed(t, r.testProcessed, 1)
-	waitSignal(t, a.runStarted, "a start")
-	bdone := request("b")
-	waitProcessed(t, r.testProcessed, 1)
-	waitSignal(t, b.runStarted, "b start")
-	cdone := request("c")
-	waitProcessed(t, r.testProcessed, 1)
-	require.Zero(t, c.runCalls.Load(), "pending starts consume capacity")
-	a.markReady()
-	waitProcessed(t, r.testProcessed, 1)
-	waitSignal(t, a.serveStarted, "a serving")
-	b.markReady()
-	waitProcessed(t, r.testProcessed, 1)
-	require.Zero(t, a.stopCalls.Load(), "busy victim must finish before eviction")
-	require.Zero(t, c.runCalls.Load())
-	release.Do(func() { close(a.serveBlock) })
-	for _, done := range []<-chan int{adone, bdone, cdone} {
-		select {
-		case code := <-done:
-			require.Equal(t, 200, code)
-		case <-t.Context().Done():
-			t.Fatal("request did not complete")
-		}
-	}
-	require.Equal(t, process.StateStopped, a.State())
-	require.Equal(t, process.StateReady, b.State())
-	require.Equal(t, process.StateReady, c.State())
-	require.False(t, a.stoppedWhileServing.Load())
 }
 
 func TestCapacity_NewRejectsInvalidBudget(t *testing.T) {
