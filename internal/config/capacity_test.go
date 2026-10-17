@@ -129,6 +129,17 @@ func TestConfig_CapacitySchema(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &schema))
 	resolved, err := schema.Resolve(&jsonschema.ResolveOptions{BaseURI: "https://github.com/mostlygeek/llama-swap/"})
 	require.NoError(t, err)
+	// These configurations have valid field shapes but invalid relationships.
+	// ValidateCapacity and routing validation remain the authority for them.
+	loaderRejects := map[string]bool{
+		"missing capacity settings":        true,
+		"inactive settings":                true,
+		"matrix settings":                  true,
+		"group settings":                   true,
+		"legacy groups":                    true,
+		"legacy matrix":                    true,
+		"scalar model shape in named mode": true,
+	}
 	for _, tc := range []struct {
 		name, input string
 		valid       bool
@@ -138,7 +149,8 @@ func TestConfig_CapacitySchema(t *testing.T) {
 		{"pools fractional usage", strings.Replace(poolsConfig, "usage: 6", "usage: 6.5", 1), false},
 		{"pools mixed router", strings.Replace(poolsConfig, "        pools:", "        total: 100\n        pools:", 1), false},
 		{"pools mixed model", strings.Replace(poolsConfig, "      evict_cost: 10", "      usage: 1\n      evict_cost: 10", 1), false},
-		{"pools scalar model", strings.Replace(poolsConfig, "      pools:\n        - pool: ram\n          usage: 30", "      usage: 30", 1), false},
+		// Router/model relationships are enforced by the loader, not the schema.
+		{"scalar model shape in named mode", strings.Replace(poolsConfig, "      pools:\n        - pool: ram\n          usage: 30", "      usage: 30", 1), true},
 		{"exclusive null", "models: {a: {cmd: echo a, proxy: http://localhost:8080, capacity: null}}\n" + capacityRouting, true},
 		{"exclusive empty", "models: {a: {cmd: echo a, proxy: http://localhost:8080, capacity: {}}}\n" + capacityRouting, true},
 		{"exclusive cost", "models: {a: {cmd: echo a, proxy: http://localhost:8080, capacity: {evict_cost: 7}}}\n" + capacityRouting, true},
@@ -152,12 +164,12 @@ func TestConfig_CapacitySchema(t *testing.T) {
 		{"missing usage", strings.Replace(capacityModels, "usage: 4, ", "", 1) + capacityRouting, true},
 		{"missing model capacity", strings.Replace(capacityModels, "    capacity: {usage: 4, evict_cost: 1}\n", "", 1) + capacityRouting, true},
 		{"default cost", strings.Replace(capacityModels, ", evict_cost: 1", "", 1) + capacityRouting, true},
-		{"missing capacity settings", capacityModels + "routing: {router: {use: capacity}}", false},
-		{"inactive settings", capacityModels + strings.Replace(capacityRouting, "use: capacity", "use: matrix", 1), false},
-		{"matrix settings", capacityModels + strings.Replace(capacityRouting, "    settings:\n", "    settings:\n      matrix: {vars: {a: a}, sets: {s: a}}\n", 1), false},
-		{"group settings", capacityModels + strings.Replace(capacityRouting, "    settings:\n", "    settings:\n      groups: {}\n", 1), false},
-		{"legacy groups", capacityModels + capacityRouting + "groups: {}", false},
-		{"legacy matrix", capacityModels + capacityRouting + "matrix: {vars: {a: a}, sets: {s: a}}", false},
+		{"missing capacity settings", capacityModels + "routing: {router: {use: capacity}}", true},
+		{"inactive settings", capacityModels + strings.Replace(capacityRouting, "use: capacity", "use: matrix", 1), true},
+		{"matrix settings", capacityModels + strings.Replace(capacityRouting, "    settings:\n", "    settings:\n      matrix: {vars: {a: a}, sets: {s: a}}\n", 1), true},
+		{"group settings", capacityModels + strings.Replace(capacityRouting, "    settings:\n", "    settings:\n      groups: {}\n", 1), true},
+		{"legacy groups", capacityModels + capacityRouting + "groups: {}", true},
+		{"legacy matrix", capacityModels + capacityRouting + "matrix: {vars: {a: a}, sets: {s: a}}", true},
 		{"default group", capacityModels, true},
 		{"legacy group", capacityModels + "groups: {g: {members: [a,b]}}", true},
 		{"legacy matrix compatible", capacityModels + "matrix: {vars: {a: a}, sets: {s: a}}", true},
@@ -170,6 +182,11 @@ func TestConfig_CapacitySchema(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, json.Unmarshal(data, &instance))
 			err = resolved.Validate(instance)
+			if loaderRejects[tc.name] {
+				_, loadErr := LoadConfigFromReader(strings.NewReader(tc.input))
+				require.Error(t, loadErr, "the loader must still reject invalid relationships")
+			}
+
 			if tc.valid {
 				require.NoError(t, err)
 			} else {

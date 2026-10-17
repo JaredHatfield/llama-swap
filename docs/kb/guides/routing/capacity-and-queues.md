@@ -1,9 +1,9 @@
 ---
 title: Routing capacity and request queues
-summary: Configure model residency budgets with capacity pools, inference concurrency limits, and request queues.
+summary: Configure concurrencyLimit and globalConcurrencyLimit, and understand queued work while a model is loading or busy.
 category: guides
 tags: [routing, queue, capacity, concurrency, concurrency-limit, max-concurrent-requests, global-concurrency-limit, rate-limit]
-config_keys: [routing, routing.router.settings.capacity, models.*.capacity, models.*.concurrencyLimit, globalConcurrencyLimit]
+config_keys: [routing, models.*.concurrencyLimit, globalConcurrencyLimit]
 updated: 2026-10-17
 ---
 
@@ -12,8 +12,9 @@ updated: 2026-10-17
 There is no `models.*.maxConcurrentRequests` setting. The real per-model key
 is `models.*.concurrencyLimit`, which limits active parallel requests.
 
-The router serializes model swaps and queues requests until the selected model
-is ready. Avoid using many simultaneous client retries as a capacity control:
+The router queues requests until the selected model is ready. Independent swaps
+can run in parallel; swaps involving the same victims wait for each other.
+Avoid using many simultaneous client retries as a capacity control:
 they create more queued work. Choose a routing policy that fits the models that
 may coexist, then set client timeouts high enough for the queue and load time.
 
@@ -43,62 +44,6 @@ overwhelmed by traffic spread across many different models, which a per-model
 `concurrencyLimit` cannot do since it only counts requests to one model at a
 time.
 
-## Model residency budgets
-
-Select `capacity` to keep models resident while their declared usage fits every
-pool. Pool units are operator-defined; placement still belongs in the command.
-For example, with the test responder built by `make simple-responder` on macOS:
-
-```yaml
-routing:
-  router:
-    use: capacity
-    settings:
-      capacity:
-        pools:
-          - name: ram
-            total: 100
-          - name: gpu0
-            total: 24
-models:
-  chat:
-    cmd: ./build/simple-responder_darwin_arm64 -port ${PORT}
-    capacity:
-      evict_cost: 50
-      pools:
-        - pool: ram
-          usage: 40
-        - pool: gpu0
-          usage: 20
-  embeddings:
-    cmd: ./build/simple-responder_darwin_arm64 -port ${PORT}
-    capacity:
-      pools:
-        - pool: ram
-          usage: 10
-        - pool: gpu0
-          usage: 3
-```
-
-These models fit together. Unlisted pools consume zero. To add a model spanning
-several GPUs, list each pool and its usage. Each eviction releases all of that
-model's pools; its `evict_cost` is counted once (default `1`, higher protects it).
-The planner favors lower summed eviction cost, then fewer evictions, then sorted
-model IDs. Search is bounded to 100,000 nodes; on exhaustion it uses the best
-feasible plan found, which may not be globally cheapest. Swap logs report
-`search_limited=true` in that case. Pending starts reserve resources, and busy
-victims finish their requests before unloading.
-
-Existing single-budget configs still use `capacity: {total: 100}` on the router
-and `capacity: {usage: 40, evict_cost: 50}` on a model. Choose either this form or
-named pools; do not mix them. Existing group and matrix configurations retain
-their behavior. Capacity routing cannot be combined with group/matrix settings.
-
-A missing, null, empty, or cost-only model capacity block makes that model
-exclusive: loading it unloads all other local models, and loading another model
-unloads it. Explicit empty pool lists, unknown/duplicate names, nonpositive or
-fractional numbers, and usage exceeding its pool total fail validation. Spillover
-selector targets must fit together in every pool and cannot include an exclusive
-model alongside another local target. Remote peer models are outside this local
-budget. Estimates that understate real usage can still cause an out-of-memory
-failure; leave headroom for runtime overhead.
+For model residency budgets and named resource pools, see
+`guides/routing/groups-and-matrix`. Residency budgets control which models stay
+loaded; concurrency limits control how many inference requests run at once.

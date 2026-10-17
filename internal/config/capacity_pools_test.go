@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -105,4 +106,35 @@ func TestConfig_CapacityPoolsSpillover(t *testing.T) {
 	exclusive := strings.Replace(poolsConfig, "    capacity:\n      pools:\n        - pool: ram\n          usage: 30\n", "", 1)
 	_, err = LoadConfigFromReader(strings.NewReader(exclusive + selector))
 	require.ErrorContains(t, err, "exclusive model")
+}
+
+// Load the actual complete examples, so routing documentation cannot silently
+// retain syntax rejected by the current config loader.
+func TestConfig_CapacityGuideExamples(t *testing.T) {
+	data, err := os.ReadFile("../../docs/kb/guides/routing/groups-and-matrix.md")
+	require.NoError(t, err)
+	_, section, found := strings.Cut(string(data), "## `capacity`")
+	require.True(t, found, "capacity section must exist")
+	section = strings.SplitN(section, "## Which one?", 2)[0]
+	examples := strings.Split(section, "```yaml\n")[1:]
+	require.Len(t, examples, 2, "keep named pools and single-budget compatibility examples")
+	for i, example := range examples {
+		input := strings.SplitN(example, "```", 2)[0]
+		cfg, err := LoadConfigFromReader(strings.NewReader(input))
+		require.NoError(t, err, "example %d", i+1)
+		require.Equal(t, "capacity", cfg.Routing.Router.Use)
+		// The guide says that all models in either example fit together.
+		c := cfg.Routing.Router.Settings.Capacity
+		totals := c.Totals()
+		used := make([]int64, len(totals))
+		for _, model := range cfg.Models {
+			require.False(t, model.Capacity.Exclusive())
+			for p, amount := range c.UsageVector(model.Capacity) {
+				used[p] += amount
+			}
+		}
+		for p, total := range totals {
+			require.LessOrEqual(t, used[p], total)
+		}
+	}
 }
